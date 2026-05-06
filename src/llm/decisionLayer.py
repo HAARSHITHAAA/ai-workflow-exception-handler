@@ -9,7 +9,6 @@ from src.state.stateManager import StateManager
 from src.types.index import AnomalyBundle, LLMDecision
 
 load_dotenv()
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 
 def build_prompt(bundle: AnomalyBundle, state_manager: StateManager, memory_db_path=None) -> str:
@@ -19,7 +18,11 @@ def build_prompt(bundle: AnomalyBundle, state_manager: StateManager, memory_db_p
     signals_text = "\n".join(
         f"- [{s.detector}] severity={s.severity:.2f}: {s.message}" for s in triggered
     )
-    similar_incidents = retrieve_similar_incidents(bundle, db_path=memory_db_path) if memory_db_path else retrieve_similar_incidents(bundle)
+    similar_incidents = (
+        retrieve_similar_incidents(bundle, db_path=memory_db_path)
+        if memory_db_path
+        else retrieve_similar_incidents(bundle)
+    )
     incident_memory = format_incident_memory(similar_incidents)
 
     return f"""You are an AI workflow exception handler. Respond ONLY with a JSON object, no markdown, no extra text.
@@ -57,7 +60,7 @@ def get_llm_decision(bundle: AnomalyBundle, state_manager: StateManager) -> LLMD
         )
     try:
         prompt = build_prompt(bundle, state_manager)
-        response = client.chat.completions.create(
+        response = get_groq_client().chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
@@ -80,3 +83,9 @@ def get_llm_decision(bundle: AnomalyBundle, state_manager: StateManager) -> LLMD
             corrective_steps=["Manually review"],
         )
 
+
+def get_groq_client():
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY is not configured")
+    return Groq(api_key=api_key)
