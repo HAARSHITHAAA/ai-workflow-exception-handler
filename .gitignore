@@ -1,0 +1,26 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local app state
+incidents.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Secrets
+.env
+serviceAccount.json
+*.pem
+*.key
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
