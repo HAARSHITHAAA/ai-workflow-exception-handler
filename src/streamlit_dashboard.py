@@ -403,6 +403,168 @@ def format_incident_option(dataframe, incident_id):
     )
 
 
+def incident_tokens(row):
+    parts = [
+        str(row["workflow_id"]),
+        str(row["root_cause"]),
+        str(row["action_taken"]),
+        str(row["action_result"]),
+        str(row["recovery_status"]),
+        " ".join(map(str, row["detectors_fired"])),
+        " ".join(map(str, row["warnings"])),
+        " ".join(map(str, row["corrective_steps"])),
+    ]
+    stop_words = {"the", "and", "for", "with", "that", "this", "from", "into", "event", "workflow"}
+    tokens = set()
+    for part in parts:
+        tokens.update(token for token in part.lower().replace("_", " ").split() if len(token) > 2)
+    return tokens - stop_words
+
+
+def find_similar_rows(dataframe, selected_id, limit=5):
+    selected = dataframe[dataframe["id"] == selected_id].iloc[0]
+    selected_tokens = incident_tokens(selected)
+    matches = []
+    for _, candidate in dataframe[dataframe["id"] != selected_id].iterrows():
+        candidate_tokens = incident_tokens(candidate)
+        if not selected_tokens or not candidate_tokens:
+            similarity = 0
+        else:
+            similarity = len(selected_tokens & candidate_tokens) / len(selected_tokens | candidate_tokens)
+        if similarity > 0:
+            item = candidate.copy()
+            item["similarity"] = round(similarity, 3)
+            matches.append(item)
+    matches.sort(key=lambda row: (row["similarity"], row["severity"]), reverse=True)
+    return matches[:limit]
+
+
+def render_memory_tab(filtered):
+    st.subheader("Incident Memory")
+    selected_id = st.selectbox(
+        "Compare incident",
+        filtered["id"].tolist(),
+        format_func=lambda incident_id: format_incident_option(filtered, incident_id),
+        key="memory-selected-incident",
+    )
+    selected = filtered[filtered["id"] == selected_id].iloc[0]
+    similar_rows = find_similar_rows(filtered, selected_id)
+
+    summary_left, summary_right = st.columns([1, 2])
+    with summary_left:
+        st.metric("Selected Severity", f"{selected['severity']}/10")
+        st.metric("Similar Matches", len(similar_rows))
+        st.metric("Detectors", selected["detector_count"])
+    with summary_right:
+        st.markdown('<div class="detail-box">', unsafe_allow_html=True)
+        st.markdown(f"**Root Cause:** {selected['root_cause']}")
+        st.markdown(f"**Detectors:** {', '.join(selected['detectors_fired']) or 'None'}")
+        st.markdown(f"**Action:** `{selected['action_taken']}`")
+        st.markdown(f"**Recovery:** `{selected['recovery_status']}`")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if not similar_rows:
+        st.info("No similar incidents match the current filters yet. Run more demo events or widen the filters.")
+        return
+
+    memory_table = pd.DataFrame(
+        [
+            {
+                "id": row["id"],
+                "similarity": row["similarity"],
+                "workflow_id": row["workflow_id"],
+                "severity": row["severity"],
+                "root_cause": row["root_cause"],
+                "action_taken": row["action_taken"],
+                "recovery_status": row["recovery_status"],
+                "action_result": row["action_result"],
+            }
+            for row in similar_rows
+        ]
+    )
+    st.dataframe(
+        memory_table,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "similarity": st.column_config.ProgressColumn(
+                "Similarity",
+                min_value=0,
+                max_value=1,
+                format="%.2f",
+            ),
+            "root_cause": st.column_config.TextColumn("Root Cause", width="large"),
+            "action_result": st.column_config.TextColumn("Action Result", width="large"),
+        },
+    )
+
+
+def render_recovery_tab(filtered):
+    st.subheader("Recovery Analytics")
+    status_counts = filtered["recovery_status"].value_counts().reset_index()
+    status_counts.columns = ["recovery_status", "count"]
+    review_count = len(filtered[filtered["recovery_status"] == "needs_human_review"])
+    failing_count = len(filtered[filtered["recovery_status"] == "still_failing"])
+    avg_confidence = round(filtered["recovery_confidence"].mean(), 2) if not filtered.empty else 0
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Recovered", len(filtered[filtered["recovery_status"] == "recovered"]))
+    col2.metric("Needs Review", review_count)
+    col3.metric("Still Failing", failing_count)
+    col4.metric("Avg Recovery Confidence", avg_confidence)
+
+    chart_left, chart_right = st.columns(2)
+    with chart_left:
+        fig = px.bar(
+            status_counts,
+            x="recovery_status",
+            y="count",
+            color="recovery_status",
+            color_discrete_map=RECOVERY_STATUS_COLORS,
+        )
+        fig.update_layout(**PLOT_THEME, showlegend=False)
+        fig.update_xaxes(title=None, gridcolor="#d7e4f2")
+        fig.update_yaxes(title="Incidents", gridcolor="#d7e4f2")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with chart_right:
+        fig2 = px.scatter(
+            filtered.sort_values("timestamp_dt"),
+            x="timestamp_dt",
+            y="recovery_confidence",
+            size="severity",
+            color="recovery_status",
+            hover_data=["workflow_id", "action_taken", "recovery_message"],
+            color_discrete_map=RECOVERY_STATUS_COLORS,
+        )
+        fig2.update_layout(**PLOT_THEME)
+        fig2.update_xaxes(title=None, gridcolor="#d7e4f2")
+        fig2.update_yaxes(title="Confidence", range=[0, 1], gridcolor="#d7e4f2")
+        st.plotly_chart(fig2, use_container_width=True)
+
+    st.subheader("Recovery Worklist")
+    worklist = filtered[filtered["recovery_status"].isin(["needs_human_review", "still_failing", "unknown"])]
+    if worklist.empty:
+        st.success("No incidents currently need recovery follow-up.")
+    else:
+        st.dataframe(
+            worklist[
+                [
+                    "id",
+                    "workflow_id",
+                    "severity",
+                    "action_taken",
+                    "recovery_status",
+                    "recovery_confidence",
+                    "recovery_message",
+                    "triage_status",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
 def render_incident_workbench(filtered):
     st.subheader("Incident Workbench")
     incident_options = filtered["id"].tolist()
@@ -558,11 +720,15 @@ else:
     if filtered_df.empty:
         st.warning("No incidents match the current filters.")
     else:
-        overview_tab, workbench_tab, log_tab = st.tabs(
-            ["Overview", "Incident Workbench", "Log & Export"]
+        overview_tab, memory_tab, recovery_tab, workbench_tab, log_tab = st.tabs(
+            ["Overview", "Memory", "Recovery", "Incident Workbench", "Log & Export"]
         )
         with overview_tab:
             render_overview(filtered_df)
+        with memory_tab:
+            render_memory_tab(filtered_df)
+        with recovery_tab:
+            render_recovery_tab(filtered_df)
         with workbench_tab:
             render_incident_workbench(filtered_df)
         with log_tab:
@@ -572,6 +738,7 @@ else:
         time.sleep(refresh_seconds)
         st.cache_data.clear()
         st.rerun()
+
 
 
 
